@@ -1,0 +1,165 @@
+import requests
+import time
+import json
+
+
+def test_n8n_webhook(command, sender="테스트사용자", room="테스트방"):
+    """
+    n8n 웹훅을 테스트하는 함수
+
+    Args:
+        command: 보낼 명령어 (예: "농업공고")
+        sender: 발신자 이름
+        room: 방 이름
+
+    Returns:
+        응답 텍스트 또는 오류 메시지
+    """
+    n8n_url = "your_n8n_url"
+    timestamp = int(time.time() * 1000)
+
+    # 요청 파라미터 구성
+    params = {
+        "command": command,
+        "sender": sender,
+        "room": room,
+        "timestamp": timestamp
+    }
+
+    print(f"📡 요청 URL: {n8n_url}")
+    print(f"📡 요청 파라미터: {params}")
+
+    # 최대 5번 재시도 (3초 * 5 = 15초)
+    max_attempts = 5
+    attempt = 0
+    waiting_message_shown = False
+
+    while attempt < max_attempts:
+        try:
+            # 5초 타임아웃 설정
+            response = requests.get(n8n_url, params=params, timeout=5)
+
+            # 응답 확인
+            if response.status_code == 200:
+                print(f"✅ 응답 코드: {response.status_code}")
+                response_text = response.text
+                print(f"📩 응답 데이터 (처음 100자): {response_text[:100]}")
+
+                # JSON 파싱 시도
+                try:
+                    parsed_response = parse_response(response_text)
+                    print(f"✅ 파싱 성공: {type(parsed_response)}")
+
+                    if isinstance(parsed_response, dict) and "response" in parsed_response:
+                        print("\n=== 최종 응답 ===")
+                        print(parsed_response["response"])
+                        print("================\n")
+                        return parsed_response["response"]
+                    else:
+                        print("\n=== 최종 응답 ===")
+                        print(parsed_response)
+                        print("================\n")
+                        return str(parsed_response)
+
+                except Exception as e:
+                    print(f"❌ 응답 파싱 실패: {e}")
+                    print(f"원본 응답: {response_text}")
+                    return f"응답 파싱 오류: {e}"
+            else:
+                print(f"❌ HTTP 오류: {response.status_code}")
+                print(f"응답 내용: {response.text}")
+
+        except requests.exceptions.Timeout:
+            print(f"⏱️ 요청 {attempt + 1}번째 시도 타임아웃")
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 요청 {attempt + 1}번째 시도 실패: {e}")
+
+        # 6초 이상 걸리면 대기 메시지 출력
+        if attempt == 1 and not waiting_message_shown:
+            print("⌛ 요청을 처리 중입니다. 잠시만 기다려 주세요...")
+            waiting_message_shown = True
+
+        attempt += 1
+        if attempt < max_attempts:
+            print(f"🔄 {3}초 후 재시도... ({attempt}/{max_attempts})")
+            time.sleep(3)
+
+    return "⚠ 서버 연결 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+
+
+def parse_response(text):
+    """
+    응답 텍스트를 파싱하는 함수
+
+    Args:
+        text: 응답 텍스트
+
+    Returns:
+        파싱된 JSON 또는 텍스트
+    """
+    if not text:
+        print("❌ 빈 응답 데이터")
+        return {"response": "서버에서 응답이 없습니다."}
+
+    cleaned_text = text.strip()
+
+    # 응답이 HTML로 감싸져 있는 경우 추출 시도
+    import re
+    body_match = re.search(r'<body.*?>([\s\S]*?)<\/body>', cleaned_text, re.IGNORECASE)
+    if body_match:
+        cleaned_text = body_match.group(1).strip()
+        print("🔍 <body> 태그에서 텍스트 추출")
+
+    # HTML 태그 제거
+    if cleaned_text.startswith("<") and cleaned_text.endswith(">"):
+        cleaned_text = re.sub(r'<[^>]*>', '', cleaned_text).strip()
+        print("🔍 HTML 태그 제거 완료")
+
+    # 일반 텍스트인 경우 JSON 객체로 변환
+    if not cleaned_text.startswith("{") and not cleaned_text.startswith("["):
+        print("🔍 일반 텍스트를 JSON으로 변환")
+        return {"response": cleaned_text}
+
+    # 작은따옴표를 큰따옴표로 변환
+    if "'" in cleaned_text and '"' not in cleaned_text:
+        cleaned_text = cleaned_text.replace("'", '"')
+        print("🔍 작은따옴표를 큰따옴표로 변환")
+
+    # JSON 파싱 시도
+    try:
+        return json.loads(cleaned_text)
+    except json.JSONDecodeError as e:
+        print(f"🔍 첫 번째 JSON 파싱 실패: {e}")
+
+        # 속성명에 따옴표 추가 시도
+        try:
+            # 속성명에 따옴표 추가
+            import re
+            cleaned_text = re.sub(r'([\'"])?([a-zA-Z0-9_]+)([\'"])?:', r'"\2":', cleaned_text)
+            print("🔍 속성명에 따옴표 추가 시도")
+            return json.loads(cleaned_text)
+        except json.JSONDecodeError:
+            # 최종적으로 원본 텍스트 반환
+            print("❌ 최종 JSON 파싱 실패")
+            return {"response": text.strip()}
+
+
+if __name__ == "__main__":
+    while True:
+        print("\n=== n8n 웹훅 테스터 ===")
+        command = input("명령어를 입력하세요 (종료하려면 'q' 입력): ")
+
+        if command.lower() == 'q':
+            print("프로그램을 종료합니다.")
+            break
+
+        if not command:
+            print("명령어를 입력해주세요!")
+            continue
+
+        print(f"\n'{command}' 명령 실행 중...\n")
+        result = test_n8n_webhook(command)
+
+        print("\n계속하려면 Enter 키를 누르세요...")
+        input()
