@@ -1,0 +1,195 @@
+const API_KEY = "your_api";
+
+function sendToN8n(command, sender, room, replier) {
+    try {
+        let n8nBaseUrl = "your_n8n";
+        let timestamp = new Date().getTime();
+        let queryUrl = n8nBaseUrl + 
+                      "?command=" + encodeURIComponent(command) + 
+                      "&sender=" + encodeURIComponent(sender) + 
+                      "&room=" + encodeURIComponent(room) + 
+                      "&timestamp=" + timestamp;
+        
+        Log.d("📡 n8n 요청 URL: " + queryUrl);
+        
+        let responseText = "";
+        let maxAttempts = 5; // 최대 5번 재시도 (3초 * 5 = 15초)
+        let attempt = 0;
+        let isWaitingMessageSent = false;
+
+        while (attempt < maxAttempts) {
+            try {
+                // 타임아웃이 있는 요청 사용하거나 기존 Utils.getWebText 사용
+                responseText = getWebTextWithTimeout(queryUrl, 10000); // 10초 타임아웃
+                // 또는 기존 함수 사용: responseText = Utils.getWebText(queryUrl);
+                
+                if (responseText) {
+                    break; // 응답이 도착하면 바로 종료
+                }
+            } catch (requestError) {
+                Log.e("📡 요청 시도 " + (attempt + 1) + " 실패: " + requestError);
+                // 오류가 발생해도 재시도 계속
+            }
+
+            // 6초 이상 걸리면 "잠시만 기다려 주세요" 메시지 출력
+            if (attempt == 2 && !isWaitingMessageSent) {
+                replier.reply("⌛ 요청을 처리 중입니다. 잠시만 기다려 주세요...");
+                isWaitingMessageSent = true;
+            }
+
+            java.lang.Thread.sleep(3000); // 3초 대기 후 다시 시도
+            attempt++;
+        }
+
+        if (!responseText) {
+            Log.e("❌ n8n 응답 없음 (모든 재시도 실패)");
+            return "⚠ 서버 연결 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.";
+        }
+
+        Log.d("📩 n8n 응답 데이터: " + responseText);
+        
+        // JSON을 안전하게 파싱
+        let jsonResponse = safeParseJSON(responseText);
+
+        if (jsonResponse && jsonResponse.response) {
+            return jsonResponse.response;
+        } else {
+            Log.d("⚠ 응답 형식 문제: " + JSON.stringify(jsonResponse));
+            return "⚠ 서버 응답을 처리할 수 없습니다. 다시 시도해주세요.";
+        }
+    } catch (e) {
+        Log.e("❌ n8n 통신 오류: " + e);
+        return "❌ 서버 연결 중 오류가 발생했습니다: " + (e.message || e);
+    }
+}
+
+// 타임아웃이 있는 웹 요청 함수
+function getWebTextWithTimeout(url, timeout) {
+    try {
+        // Java URL 객체 생성
+        let urlObj = new java.net.URL(url);
+        
+        // URLConnection 객체 생성 및 타임아웃 설정
+        let connection = urlObj.openConnection();
+        connection.setConnectTimeout(timeout);
+        connection.setReadTimeout(timeout);
+        connection.setRequestProperty("User-Agent", "KakaoTalkBot/1.0");
+        
+        // 응답 코드 확인
+        let responseCode = connection.getResponseCode();
+        if (responseCode != 200) {
+            Log.e("❌ HTTP 오류 응답: " + responseCode);
+            return null;
+        }
+        
+        // 응답 읽기
+        let inputStream = new java.io.BufferedReader(
+            new java.io.InputStreamReader(connection.getInputStream())
+        );
+        let response = new java.lang.StringBuilder();
+        let line;
+        
+        while ((line = inputStream.readLine()) != null) {
+            response.append(line).append("\n");
+        }
+        
+        inputStream.close();
+        return response.toString();
+    } catch (e) {
+        if (e.toString().includes("SocketTimeoutException")) {
+            Log.e("⏱️ 소켓 타임아웃 발생: " + e.message);
+            throw new Error("요청 시간 초과");
+        } else {
+            Log.e("❌ 웹 요청 오류: " + e);
+            throw e;
+        }
+    }
+}
+
+function safeParseJSON(text) {
+    try {
+        if (!text) {
+            Log.e("❌ 빈 응답 데이터");
+            return { response: "서버에서 응답이 없습니다." };
+        }
+        
+        let cleanedText = text.trim();
+        
+        // 디버깅용 로그 추가
+        Log.d("🔍 JSON 파싱 시작 - 원본 텍스트 길이: " + cleanedText.length);
+        Log.d("🔍 JSON 파싱 시작 - 처음 100자: " + cleanedText.substring(0, Math.min(100, cleanedText.length)));
+        
+        // 응답이 HTML로 감싸져 있는 경우, <body> 내부만 추출
+        let match = cleanedText.match(/<body.*?>([\s\S]*?)<\/body>/i);
+        if (match) {
+            cleanedText = match[1].trim();
+            Log.d("🔍 <body> 태그에서 추출된 텍스트: " + cleanedText.substring(0, Math.min(100, cleanedText.length)));
+        }
+        
+        // JSON 객체인지 확인하기 위해 첫 글자와 마지막 글자 검사
+        cleanedText = cleanedText.trim();
+        if (cleanedText.startsWith("<") && cleanedText.endsWith(">")) {
+            // HTML 태그가 남아있으면 텍스트 내용만 추출 시도
+            cleanedText = cleanedText.replace(/<[^>]*>/g, "").trim();
+            Log.d("🔍 HTML 태그 제거 후: " + cleanedText.substring(0, Math.min(100, cleanedText.length)));
+        }
+        
+        // 응답이 일반 텍스트인 경우 JSON 형식으로 변환
+        if (!cleanedText.startsWith("{") && !cleanedText.startsWith("[")) {
+            Log.d("🔍 일반 텍스트를 JSON으로 변환 시도");
+            return { response: cleanedText };
+        }
+        
+        // 따옴표 문제 수정 (작은따옴표를 큰따옴표로 변환)
+        if (cleanedText.includes("'") && !cleanedText.includes('"')) {
+            cleanedText = cleanedText.replace(/'/g, '"');
+            Log.d("🔍 작은따옴표를 큰따옴표로 변환");
+        }
+        
+        // 여러 번의 JSON.parse 시도
+        try {
+            return JSON.parse(cleanedText);
+        } catch (parseError) {
+            Log.d("🔍 첫 번째 JSON.parse 실패: " + parseError);
+            
+            // 쉼표나 따옴표 문제 처리
+            if (cleanedText.includes("\"")) {
+                cleanedText = cleanedText.replace(/(['"])?([a-zA-Z0-9_]+)(['"])?:/g, '"$2":');
+                Log.d("🔍 속성명에 따옴표 추가 시도");
+            }
+            
+            try {
+                return JSON.parse(cleanedText);
+            } catch (finalError) {
+                // 마지막 시도: 텍스트 응답으로 처리
+                Log.e("❌ 최종 JSON 파싱 실패: " + finalError);
+                return { response: text.trim() };
+            }
+        }
+    } catch (e) {
+        Log.e("❌ JSON 파싱 처리 중 오류: " + e + "\n원본 응답 일부: " + text.substring(0, Math.min(200, text.length)));
+        return { response: "서버 응답을 해석할 수 없습니다. 관리자에게 문의하세요." };
+    }
+}
+
+function response(room, msg, sender, isGroupChat, replier, imageDB, packageName) {
+    Log.d("📥 사용자 입력: " + msg);
+
+    if (msg.indexOf("세비스 ") === 0 || msg == "세비스") {
+        let command = msg.replace("세비스", "").trim();
+        if (!command) {
+            replier.reply("세비스 명령어를 입력해주세요. 예: 세비스 농업공고");
+            return;
+        }
+
+        let n8nResponse = sendToN8n(command, sender, room, replier);
+
+        Log.d("📤 최종 응답 데이터: " + n8nResponse);
+
+        if (n8nResponse) {
+            replier.reply(n8nResponse);
+        } else {
+            replier.reply("⚠ 서버 응답이 없습니다. 다시 시도해주세요.");
+        }
+    }
+}
